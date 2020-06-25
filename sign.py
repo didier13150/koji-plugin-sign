@@ -2,11 +2,16 @@
 #
 # Author:
 #     Paul B Schroeder <paulbsch "at" vbridges "dot" com>
+# Modified by:
+#     Didier Fabert <didier "at" tartarefr "dot" eu>
 
 from koji.plugin import register_callback
 import logging
+import koji
 
-config_file = '/etc/koji-hub/plugins/sign.conf'
+CONFIG_FILE = '/etc/koji-hub/plugins/sign.conf'
+CONFIG = None
+LOG = logging.getLogger('koji.plugin.sign')
 
 def sign(cbtype, *args, **kws):
     if kws['type'] != 'build':
@@ -16,19 +21,19 @@ def sign(cbtype, *args, **kws):
     import sys
     sys.path.insert(0, '/usr/share/koji-hub')
     from kojihub import get_buildroot
-    br_id = kws['brmap'].values()[0]
+    br_id = list(kws['brmap'].values())[0]
     br = get_buildroot(br_id)
     tag_name = br['tag_name']
 
     # Get GPG info using the config for the tag name
-    from ConfigParser import ConfigParser
-    config = ConfigParser()
-    config.read(config_file)
-    rpm = config.get(tag_name, 'rpm')
-    gpgbin = config.get(tag_name, 'gpgbin')
-    gpg_path = config.get(tag_name, 'gpg_path')
-    gpg_name = config.get(tag_name, 'gpg_name')
-    gpg_pass = config.get(tag_name, 'gpg_pass')
+    global CONFIG
+    if not CONFIG:
+        CONFIG = koji.read_config_files([(CONFIG_FILE, True)])
+    rpm = CONFIG.get(tag_name, 'rpm')
+    gpgbin = CONFIG.get(tag_name, 'gpgbin')
+    gpg_path = CONFIG.get(tag_name, 'gpg_path')
+    gpg_name = CONFIG.get(tag_name, 'gpg_name')
+    gpg_pass = CONFIG.get(tag_name, 'gpg_pass')
 
     # Get the package paths set up
     from koji import pathinfo
@@ -39,9 +44,15 @@ def sign(cbtype, *args, **kws):
 
     # Get the packages signed
     import pexpect
-    logging.getLogger('koji.plugin.sign').info('Attempting to sign packages'
+    LOG.info('Attempting to sign packages'
        ' (%s) with key "%s"' % (rpms, gpg_name))
-    rpm_cmd = "%s --resign --define '_signature gpg'" % rpm
+    rpm_cmd = "%s --resign"
+    # According to gpg man page, loopback redirect Pinentry queries to the caller.
+    # Default values for macros can be printed with "rpm --showrc" command
+    rpm_cmd += " --define '_gpg_sign_cmd_extra_args --pinentry-mode=loopback'"
+    #rpm_cmd += " --define '__gpg_sign_cmd %{__gpg} gpg --pinentry-mode=loopback --no-verbose --no-armor --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}'"
+    #rpm_cmd += " --define '__gpg_check_password_cmd /bin/true'"
+    rpm_cmd += " --define '_signature gpg'" % rpm
     rpm_cmd += " --define '_gpgbin %s'" % gpgbin
     rpm_cmd += " --define '_gpg_path %s'" % gpg_path
     rpm_cmd += " --define '_gpg_name %s' %s" % (gpg_name, rpms)
@@ -50,17 +61,17 @@ def sign(cbtype, *args, **kws):
     pex.sendline(gpg_pass)
     i = pex.expect(['good', 'failed', 'skipping', pexpect.TIMEOUT])
     if i == 0:
-        logging.getLogger('koji.plugin.sign').info('Package sign successful!')
+        LOG.info('Package sign successful!')
     elif i == 1:
-        logging.getLogger('koji.plugin.sign').error('Pass phrase check failed!')
+        LOG.error('Pass phrase check failed!')
     elif i == 2:
-        logging.getLogger('koji.plugin.sign').error('Package sign skipped!')
+        LOG.error('Package sign skipped!')
     elif i == 3:
-        logging.getLogger('koji.plugin.sign').error('Package sign timed out!')
+        LOG.error('Package sign timed out!')
     else:
-        logging.getLogger('koji.plugin.sign').error('Unexpected sign result!')
+        LOG.error('Unexpected sign result!')
     if i != 0:
-        raise Exception, 'Package sign failed!'
+        raise Exception('Package sign failed!')
     pex.expect(pexpect.EOF)
 
 register_callback('preImport', sign)
